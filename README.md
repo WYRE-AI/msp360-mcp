@@ -8,14 +8,39 @@ Provide the Managed Backup Service provider-portal `UserName`/`Password` pair. T
 
 ## Configuration
 
-| Env var | Description |
-|---|---|
-| `MSP360_USERNAME` | MSP360 provider-portal username. |
-| `MSP360_PASSWORD` | MSP360 provider-portal password. |
-| `MCP_TRANSPORT` | `stdio` (default) or `http`. |
-| `AUTH_MODE` | `env` (default, reads the vars above) or `gateway` (credentials arrive per-request via `X-MSP360-Username` / `X-MSP360-Password` headers, injected by the Conduit gateway). |
-| `CONDUIT_S2S_SECRET` | When set, the HTTP transport requires a valid `X-Gateway-S2S` header (Conduit sidecar auth) on every `/mcp` request. |
-| `LOG_LEVEL` | `debug` \| `info` (default) \| `warn` \| `error`. |
+Copy [`.env.example`](.env.example) and set the variables below. Leave `CONDUIT_S2S_SECRET` empty in that file.
+
+| Env var | Required | Description |
+|---|---|---|
+| `MSP360_USERNAME` | For stdio and `AUTH_MODE=env` | MSP360 provider-portal username. |
+| `MSP360_PASSWORD` | For stdio and `AUTH_MODE=env` | MSP360 provider-portal password. |
+| `MCP_TRANSPORT` | No | `stdio` (default) or `http`. |
+| `MCP_HTTP_HOST` | No | Bind address when `MCP_TRANSPORT=http`. Defaults to `127.0.0.1`. A configured `CONDUIT_S2S_SECRET` honors this value. The container image sets `0.0.0.0`. |
+| `MCP_HTTP_PORT` | No | HTTP port. Defaults to `8080`. |
+| `AUTH_MODE` | No | `env` (default) or `gateway`. Gateway mode requires `X-MSP360-Username` and `X-MSP360-Password` on each `/mcp` request and does not fall back to `MSP360_*`. `env` uses those variables after S2S auth succeeds. |
+| `CONDUIT_S2S_SECRET` | Yes for HTTP | Service-to-service secret. The HTTP server logs an error and exits non-zero when this is empty or a known placeholder (`changeme`, `placeholder`, `your-s2s-secret`, `secret`, `password`, `test`, and unresolved `${...}` templates). Compose will not start when it is unset. Never commit a real value. |
+| `MCP_ALLOW_INSECURE_DEV` | No | Set to `1` only for local development to start HTTP without `CONDUIT_S2S_SECRET`. The process logs a warning, does not enforce `X-Gateway-S2S`, and listens on `127.0.0.1` only (a wider `MCP_HTTP_HOST` is overridden). A placeholder secret is still refused. |
+| `LOG_LEVEL` | No | `debug`, `info` (default), `warn`, or `error`. |
+
+`/health` stays unauthenticated and does not read MSP360 credentials. The stdio transport does not use `CONDUIT_S2S_SECRET`.
+
+### X-Gateway-S2S signing
+
+With `MCP_TRANSPORT=http` and `CONDUIT_S2S_SECRET` set, every `/mcp` request must include `X-Gateway-S2S`. The header value is:
+
+```text
+t=<unix seconds>,v1=<hex hmac-sha256>
+```
+
+`v1` is HMAC-SHA256 (hex, lowercase) of the ASCII string `t=<unix seconds>`, keyed with `CONDUIT_S2S_SECRET`. The timestamp must be within 300 seconds of the server clock. A missing or invalid header returns 401. The process never writes the secret to logs.
+
+```text
+X-Gateway-S2S: t=1710000000,v1=<hmac-sha256("t=1710000000")>
+```
+
+Generate a secret with `openssl rand -hex 32`.
+
+In `AUTH_MODE=gateway`, `/mcp` also requires `X-MSP360-Username` and `X-MSP360-Password`. Those headers are the only credential source for that request. A request missing either header returns 401 and does not read `MSP360_USERNAME` or `MSP360_PASSWORD` from the environment.
 
 ## Tools
 
@@ -56,9 +81,44 @@ npm test
 npm run lint   # tsc --noEmit
 ```
 
+HTTP refuses to start until `CONDUIT_S2S_SECRET` is set:
+
+```bash
+CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" npm run start:http
+```
+
+Local HTTP without a secret is development-only. It binds `127.0.0.1` and logs a warning:
+
+```bash
+MCP_ALLOW_INSECURE_DEV=1 npm run start:http
+```
+
 ## Docker
+
+The image listens on `0.0.0.0` inside the container (`MCP_HTTP_HOST`) and defaults to `AUTH_MODE=gateway`. Publish the port on loopback and pass the S2S secret. In gateway mode, MSP360 credentials arrive on each request as `X-MSP360-Username` and `X-MSP360-Password`. They are not read from the environment.
 
 ```bash
 docker build -t msp360-mcp .
-docker run -p 8080:8080 -e MSP360_USERNAME=... -e MSP360_PASSWORD=... msp360-mcp
+docker run \
+  -e CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" \
+  -p 127.0.0.1:8080:8080 \
+  msp360-mcp
+```
+
+The checked-in Compose service is gateway mode. It does not set `MSP360_USERNAME` or `MSP360_PASSWORD` and does not use `env_file`, so a project `.env` cannot inject static vendor credentials into the container. Compose still interpolates `CONDUIT_S2S_SECRET` and `LOG_LEVEL` from that file. It refuses to start when `CONDUIT_S2S_SECRET` is unset and publishes `127.0.0.1:8080:8080`. Every `/mcp` request must carry `X-Gateway-S2S` (see [X-Gateway-S2S signing](#x-gateway-s2s-signing)) plus the credential headers.
+
+```bash
+CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" docker compose up
+```
+
+Single-tenant HTTP (`AUTH_MODE=env`) still requires the S2S secret, then uses `MSP360_USERNAME` and `MSP360_PASSWORD`:
+
+```bash
+docker run \
+  -e CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" \
+  -e AUTH_MODE=env \
+  -e MSP360_USERNAME=your-username \
+  -e MSP360_PASSWORD=your-password \
+  -p 127.0.0.1:8080:8080 \
+  msp360-mcp
 ```

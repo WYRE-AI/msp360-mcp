@@ -136,6 +136,19 @@ function resolveListenHost(s2sSecret: string): string {
   return LOOPBACK_HOST;
 }
 
+/**
+ * Start the MSP360 MCP Streamable HTTP server.
+ *
+ * Fails closed: a missing, blank, or placeholder CONDUIT_S2S_SECRET logs an
+ * error and calls process.exit(1) before anything listens, unless
+ * MCP_ALLOW_INSECURE_DEV=1 is set, which skips X-Gateway-S2S and binds
+ * 127.0.0.1 only. With a secret, every /mcp request must carry a valid
+ * X-Gateway-S2S header; /health stays unauthenticated.
+ *
+ * @returns The listening `Server`, once `listen` has succeeded.
+ * @throws Rejects with the bind error (for example EADDRINUSE or EACCES) if
+ *   the port cannot be bound.
+ */
 export async function startHttpTransport(): Promise<Server> {
   const s2sSecret = resolveHttpS2sSecret();
   const port = parseInt(process.env.MCP_HTTP_PORT || '8080', 10);
@@ -182,6 +195,15 @@ export async function startHttpTransport(): Promise<Server> {
     const username = headerValue(req.headers['x-msp360-username']);
     const password = headerValue(req.headers['x-msp360-password']);
 
+    // node:http does not await this listener. Catch a rejected connect or
+    // handleRequest so one bad request cannot crash the process. The log
+    // stays generic because error text can echo tenant credentials.
+    const fail = (error: unknown): void => {
+      logger.error('MCP request failed', { errorName: error instanceof Error ? error.name : typeof error });
+      if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' });
+      if (!res.writableEnded) res.end(JSON.stringify({ error: 'Internal server error' }));
+    };
+
     const handle = async () => {
       // SECURITY-CRITICAL invariant: this transport MUST stay stateless
       // (sessionIdGenerator: undefined + enableJsonResponse: true).
@@ -214,11 +236,11 @@ export async function startHttpTransport(): Promise<Server> {
         res.end(JSON.stringify(GATEWAY_CREDENTIALS_UNAUTHORIZED));
         return;
       }
-      await runWithCredentials({ username, password }, handle);
+      await runWithCredentials({ username, password }, handle).catch(fail);
       return;
     }
 
-    await handle();
+    await handle().catch(fail);
   });
 
   await new Promise<void>((resolve, reject) => {

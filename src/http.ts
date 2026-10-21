@@ -1,13 +1,13 @@
-import { createServer as createHttpServer } from 'node:http';
+import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createServer } from './server.js';
 import { getCredentials, runWithCredentials } from './client.js';
 import { logger } from './utils/logger.js';
+import { MAX_REQUEST_BODY_BYTES } from './input-limits.js';
 import { verifyS2sHeader, S2S_HEADER } from './s2s-verify.js';
 
-const S2S_SECRET = process.env.CONDUIT_S2S_SECRET || '';
-
-function startHttpServer(): void {
+export function startHttpServer(): Promise<HttpServer> {
+  const S2S_SECRET = process.env.CONDUIT_S2S_SECRET || '';
   const port = parseInt(process.env.MCP_HTTP_PORT || '8080', 10);
   const host = process.env.MCP_HTTP_HOST || '0.0.0.0';
   const isGatewayMode = process.env.AUTH_MODE === 'gateway';
@@ -50,6 +50,20 @@ function startHttpServer(): void {
       return;
     }
 
+    // Body cap runs only after S2S passes so unauthenticated callers still get 401.
+    const contentLength = Number(req.headers['content-length']);
+    if (Number.isFinite(contentLength) && contentLength > MAX_REQUEST_BODY_BYTES) {
+      res.writeHead(413, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          error: { code: -32600, message: `Request body exceeds ${MAX_REQUEST_BODY_BYTES} bytes` },
+          id: null,
+        })
+      );
+      return;
+    }
+
     const username = isGatewayMode ? (req.headers['x-msp360-username'] as string | undefined) : undefined;
     const password = isGatewayMode ? (req.headers['x-msp360-password'] as string | undefined) : undefined;
 
@@ -66,6 +80,7 @@ function startHttpServer(): void {
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,
+        maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
       });
       res.on('close', () => {
         transport.close();
@@ -82,14 +97,18 @@ function startHttpServer(): void {
     }
   });
 
-  httpServer.listen(port, host, () => {
-    logger.info(`HTTP streaming server listening on ${host}:${port}`);
+  return new Promise((resolve) => {
+    httpServer.listen(port, host, () => {
+      logger.info(`HTTP streaming server listening on ${host}:${port}`);
+      resolve(httpServer);
+    });
   });
 }
 
-const transport = process.env.MCP_TRANSPORT;
-if (transport === 'http') {
-  startHttpServer();
-} else {
-  import('./index.js');
+if (process.env.VITEST !== 'true') {
+  if (process.env.MCP_TRANSPORT === 'http') {
+    void startHttpServer();
+  } else {
+    import('./index.js');
+  }
 }

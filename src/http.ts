@@ -6,6 +6,12 @@ import { logger } from './utils/logger.js';
 import { MAX_REQUEST_BODY_BYTES } from './input-limits.js';
 import { verifyS2sHeader, S2S_HEADER } from './s2s-verify.js';
 
+/**
+ * Start the stateless streamable-HTTP MCP server.
+ *
+ * Reads CONDUIT_S2S_SECRET, MCP_HTTP_PORT, MCP_HTTP_HOST and AUTH_MODE at call time.
+ * Resolves with the listening server, or rejects if binding fails (e.g. EADDRINUSE).
+ */
 export function startHttpServer(): Promise<HttpServer> {
   const S2S_SECRET = process.env.CONDUIT_S2S_SECRET || '';
   const port = parseInt(process.env.MCP_HTTP_PORT || '8080', 10);
@@ -97,8 +103,10 @@ export function startHttpServer(): Promise<HttpServer> {
     }
   });
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    httpServer.once('error', reject);
     httpServer.listen(port, host, () => {
+      httpServer.off('error', reject);
       logger.info(`HTTP streaming server listening on ${host}:${port}`);
       resolve(httpServer);
     });
